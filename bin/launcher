@@ -72,9 +72,12 @@ else
   exit 1
 fi
 
+declare -a children
+
 on_exit() {
   rm -fr "${DATA_DIR}/lock"
   rm -fr "${LOGS_DIR}/lock"
+  kill -TERM "${children[@]}" || true
 }
 trap on_exit EXIT
 
@@ -108,4 +111,6 @@ else
 fi
 
 echo "http.port=${HTTP_PORT}"
-nc -l -p "${HTTP_PORT}" -v
+nc -l -p "${HTTP_PORT}" -v &
+children[${#children[*]}]="$!"
+wait "${children[@]}"
