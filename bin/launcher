@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+
+set -e
+
+if [[ "$(whoami)" != "nobody" ]]; then
+  echo "$0: wrong user to launch my application" 1>&2
+  exit 1
+fi
+
+if [ ! -f "config/config.properties" ]; then
+  echo "$0: config.properties doesn't exist" 1>&2
+  exit 1
+fi
+
+if [ ! -f "config/log.properties" ]; then
+  echo "$0: log.properties doesn't exist" 1>&2
+  exit 1
+fi
+
+if [ ! -f "config/database.yml" ]; then
+  echo "$0: database.yml doesn't exist" 1>&2
+fi
