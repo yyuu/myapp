@@ -1,22 +1,111 @@
 #!/usr/bin/env bash
 
 set -e
+[ -z "${DEBUG}" ] || set -x
+
+unset DATA_DIR
+unset HTTP_PORT
+unset LOGS_DIR
+unset MASTER
+
+for param in $(cat "config/config.properties" 2>/dev/null || true); do
+  case "${param}" in
+  "data.dir="* )
+    DATA_DIR="${param#data.dir=}"
+    ;;
+  "http.port="* )
+    HTTP_PORT="${param#http.port=}"
+    ;;
+  "logs.dir="* )
+    LOGS_DIR="${param#logs.dir=}"
+    ;;
+  "master="* )
+    MASTER="${param#master=}"
+    ;;
+  "#"* )
+    continue
+    ;;
+  * )
+    echo "$0: unknown configuration: ${param}" 1>&2
+    exit 1
+    ;;
+  esac
+done
+
+while [ "$#" -gt 1 ]; do
+  case "$1" in
+  "-Ddata.dir="* )
+    DATA_DIR="${1#-Ddata.dir=}"
+    ;;
+  "-Dhttp.port="* )
+    HTTP_PORT="${1#-Dhttp.port=}"
+    ;;
+  "-Dlogs.dir="* )
+    LOGS_DIR="${1#-Dlogs.dir=}"
+    ;;
+  "-Dmaster="* )
+    MASTER="${1#-Dmaster=}"
+    ;;
+  * )
+    echo "$0: unknown argument: $1" 1>&2
+    exit 1
+    ;;
+  esac
+  shift 1
+done
+
+if [ -n "${APP_ENV}" ]; then
+  echo "APP_ENV = ${APP_ENV}"
+else
+  echo "$0: APP_ENV is not declared" 1>&2
+  exit 1
+fi
+
+if [ -f "config/database.yml" ]; then
+  PASSWORD="$(ruby -ryaml -e 'STDOUT.puts(YAML.load_file("config/database.yml")[ENV["APP_ENV"]]["password"])' || true)"
+  if [ -z "${PASSWORD}" ]; then
+    echo "$0: database password is not set" 1>&2
+    exit 1
+  fi
+else
+  echo "$0: database.yml doesn't exist" 1>&2
+  exit 1
+fi
+
+on_exit() {
+  rm -fr "${DATA_DIR}/lock"
+  rm -fr "${LOGS_DIR}/lock"
+}
+trap on_exit EXIT
 
 if [[ "$(whoami)" != "nobody" ]]; then
   echo "$0: wrong user to launch my application" 1>&2
   exit 1
 fi
 
-if [ ! -f "config/config.properties" ]; then
-  echo "$0: config.properties doesn't exist" 1>&2
+if [ -d "${DATA_DIR}" ] && [ -w "${DATA_DIR}" ]; then
+  if mkdir "${DATA_DIR}/lock" 1>/dev/null 2>&1; then
+    echo "data.dir=${DATA_DIR}"
+  else
+    echo "$0: data.dir is already used from other process: ${DATA_DIR}" 1>&2
+    exit 1
+  fi
+else
+  echo "$0: data.dir isn't available: ${DATA_DIR}" 1>&2
   exit 1
 fi
 
-if [ ! -f "config/log.properties" ]; then
-  echo "$0: log.properties doesn't exist" 1>&2
+if [ -d "${LOGS_DIR}" ] && [ -w "${LOGS_DIR}" ]; then
+  if mkdir "${LOGS_DIR}/lock" 1>/dev/null 2>&1; then
+    echo "logs.dir=${LOGS_DIR}"
+  else
+    echo "$0: logs.dir is already used from other process: ${LOGS_DIR}" 1>&2
+    exit 1
+  fi
+else
+  echo "$0: logs.dir isn't available: ${LOGS_DIR}" 1>&2
   exit 1
 fi
 
-if [ ! -f "config/database.yml" ]; then
-  echo "$0: database.yml doesn't exist" 1>&2
-fi
+echo "http.port=${HTTP_PORT}"
+nc -l -p "${HTTP_PORT}" -v
