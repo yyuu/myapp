@@ -47,7 +47,7 @@ while [ "$#" -gt 0 ]; do
     MASTER="${1#-Dmaster=}"
     ;;
   "--version" )
-    echo "${BASH_SOURCE[0]##*/} v0.1.0"
+    echo "${BASH_SOURCE[0]##*/} $(git describe --tags HEAD 2>/dev/null || true)"
     exit 0
     ;;
   * )
