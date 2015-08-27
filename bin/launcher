@@ -32,7 +32,7 @@ for param in $(cat "config/config.properties" 2>/dev/null || true); do
   esac
 done
 
-while [ "$#" -gt 1 ]; do
+while [ "$#" -gt 0 ]; do
   case "$1" in
   "-Ddata.dir="* )
     DATA_DIR="${1#-Ddata.dir=}"
@@ -45,6 +45,10 @@ while [ "$#" -gt 1 ]; do
     ;;
   "-Dmaster="* )
     MASTER="${1#-Dmaster=}"
+    ;;
+  "--version" )
+    echo "${BASH_SOURCE[0]##*/} v0.1.0"
+    exit 0
     ;;
   * )
     echo "$0: unknown argument: $1" 1>&2
