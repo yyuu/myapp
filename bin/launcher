@@ -1,6 +1,7 @@
 #!/usr/bin/env ruby
 
 require "bundler/setup"
+require "fileutils"
 require "sinatra"
 
 ROOT = File.expand_path("../..", __FILE__)
@@ -31,6 +32,12 @@ if File.file?(properties)
   options = options.merge(load_properties(properties))
 end
 
+if master = options.delete(:master)
+  application_type = master ? "master" : "slave"
+else
+  application_type = "unknown"
+end
+
 if port = options.delete(:"http.port")
   options[:port] = port
 end
@@ -44,15 +51,13 @@ if data = options.delete(:"data.dir")
 end
 
 if logs = options.delete(:"logs.dir")
-  file = File.new(File.join(logs, "application.log"), "a+")
+  file = File.new(File.join(logs, "#{application_type}.log"), "a+")
   file.sync = true
   unless file.flock(File::LOCK_EX | File::LOCK_NB)
     raise("another process is using logs.dir=#{logs.inspect}")
   end
   use Rack::CommonLogger, file
 end
-
-master = options.delete(:master)
 
 known_options = [
   :bind,
@@ -75,14 +80,13 @@ options.each do |k, v|
   end
 end
 
+FileUtils.mkdir_p(File.join(ROOT, "tmp", "pids"))
+File.write(File.join(ROOT, "tmp", "pids", "#{application_type}.pid"), $$.to_s)
+
 get "/status" do
   "ok"
 end
 
-get "/role" do
-  if master
-    "master"
-  else
-    "slave"
-  end
+get "/type" do
+  application_type
 end
