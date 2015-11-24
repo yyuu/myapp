@@ -2,7 +2,11 @@
 
 require "bundler/setup"
 require "fileutils"
+require "json"
+require "open-uri"
 require "sinatra"
+require "thread"
+require "uri"
 
 ROOT = File.expand_path("../..", __FILE__)
 
@@ -22,7 +26,7 @@ def load_properties(properties)
 end
 
 options = {
-  environment: ENV["APP_ENV"],
+  environment: (ENV["APP_ENV"] || "development"),
   logging: true,
   dump_errors: true,
 }
@@ -32,10 +36,12 @@ if File.file?(properties)
   options = options.merge(load_properties(properties))
 end
 
+discovery_uri = options.delete(:discovery_uri)
+
 if master = options.delete(:master)
-  application_type = master ? "master" : "slave"
+  application_type = "master"
 else
-  application_type = "unknown"
+  application_type = "slave"
 end
 
 if port = options.delete(:"http.port")
@@ -83,10 +89,75 @@ end
 FileUtils.mkdir_p(File.join(ROOT, "tmp", "pids"))
 File.write(File.join(ROOT, "tmp", "pids", "#{application_type}.pid"), $$.to_s)
 
-get "/status" do
-  "ok"
-end
-
 get "/type" do
   application_type
+end
+
+if master
+  $nodes = {}
+  $nodes_lock = Mutex.new
+
+  get "/status" do
+    JSON.generate({"status": "ok"})
+  end
+
+  get "/join" do
+    if params["environment"] != options[:environment]
+      error 400, "no environment specified"
+    end
+    $nodes_lock.synchronize do
+      $nodes["#{request.ip}:#{params["port"] || options[:port]}"] = Time.new.to_i
+    end
+    JSON.generate({"join": "ok"})
+  end
+
+  get "/leave" do
+    if params["environment"] != options[:environment]
+      error 400, "no environment specified"
+    end
+    $nodes_lock.synchronize do
+      $nodes["#{request.ip}:#{params["port"] || options[:port]}"] = nil
+    end
+    JSON.generate({"leave": "ok"})
+  end
+
+  get "/nodes" do
+    JSON.generate({"nodes": $nodes.select { |k, v| v }.keys})
+  end
+else
+  $status = false
+
+  get "/status" do
+    JSON.generate({"status": $status ? "ok" : "ng"})
+  end
+
+  get "/join" do
+    if discovery_uri
+      query = URI.encode_www_form(environment: options[:environment], port: options[:port])
+      uri = URI.join(URI.parse(discovery_uri), "join?#{query}")
+      join = JSON.parse(open(uri).read())
+      if join["join"] == "ok"
+        $status = true
+        JSON.generate({"join": "ok"})
+      else
+        error 400, "failed to join"
+      end
+    else
+      error 400, "failed to join"
+    end
+  end
+
+  Thread.new do
+    loop do
+      begin
+        join = JSON.parse(open(URI.parse("http://#{options[:bind] || "127.0.0.1"}:#{options[:port]}/join")).read)
+        if join["join"] == "ok"
+          # nop
+        end
+      rescue
+        # nop
+      end
+      sleep(2)
+    end
+  end
 end
