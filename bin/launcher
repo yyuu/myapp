@@ -9,6 +9,7 @@ require "thread"
 require "uri"
 
 ROOT = File.expand_path("../..", __FILE__)
+VERSION = "0.2.0"
 
 def load_properties(properties)
   lines = File.readlines(properties).map { |s| s.strip }.reject { |s| s.empty? or s.start_with?("#") }
@@ -90,7 +91,11 @@ FileUtils.mkdir_p(File.join(ROOT, "tmp", "pids"))
 File.write(File.join(ROOT, "tmp", "pids", "#{application_type}.pid"), $$.to_s)
 
 get "/type" do
-  application_type
+  JSON.generate({"type": application_type})
+end
+
+get "/version" do
+  JSON.generate({"version": VERSION})
 end
 
 if master
