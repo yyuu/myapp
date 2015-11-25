@@ -94,11 +94,18 @@ get "/type" do
 end
 
 if master
+  STDERR.puts("master app")
   $nodes = {}
   $nodes_lock = Mutex.new
 
   get "/status" do
-    JSON.generate({"status": "ok"})
+    $nodes_lock.synchronize do
+      if $nodes.length < 2 # master requires at least 2 slaves
+        JSON.generate({"status": "ng"})
+      else
+        JSON.generate({"status": "ok"})
+      end
+    end
   end
 
   get "/join" do
@@ -125,6 +132,7 @@ if master
     JSON.generate({"nodes": $nodes.select { |k, v| v }.keys})
   end
 else
+  STDERR.puts("slave app")
   $status = false
 
   get "/status" do
