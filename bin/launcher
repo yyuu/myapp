@@ -1,120 +1,167 @@
-#!/usr/bin/env bash
+#!/usr/bin/env ruby
 
-set -e
-[ -z "${DEBUG}" ] || set -x
+require "bundler/setup"
+require "fileutils"
+require "json"
+require "open-uri"
+require "sinatra"
+require "thread"
+require "uri"
 
-unset DATA_DIR
-unset HTTP_PORT
-unset LOGS_DIR
-unset MASTER
+ROOT = File.expand_path("../..", __FILE__)
+VERSION = "0.2.0"
 
-for param in $(cat "config/config.properties" 2>/dev/null || true); do
-  case "${param}" in
-  "data.dir="* )
-    DATA_DIR="${param#data.dir=}"
-    ;;
-  "http.port="* )
-    HTTP_PORT="${param#http.port=}"
-    ;;
-  "logs.dir="* )
-    LOGS_DIR="${param#logs.dir=}"
-    ;;
-  "master="* )
-    MASTER="${param#master=}"
-    ;;
-  "#"* )
-    continue
-    ;;
-  * )
-    echo "$0: unknown configuration: ${param}" 1>&2
-    exit 1
-    ;;
-  esac
-done
+def load_properties(properties)
+  lines = File.readlines(properties).map { |s| s.strip }.reject { |s| s.empty? or s.start_with?("#") }
+  Hash[lines.map { |line|
+    k, v = line.split(/\s*=\s*/, 2)
+    case v
+    when /\A(\d+)\z/
+      [k.to_sym, v.to_i]
+    when /\A(false|true)\z/i
+      [k.to_sym, /\Afalse\z/i !~ v]
+    else
+      [k.to_sym, v.to_s]
+    end
+  }]
+end
 
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-  "-Ddata.dir="* )
-    DATA_DIR="${1#-Ddata.dir=}"
-    ;;
-  "-Dhttp.port="* )
-    HTTP_PORT="${1#-Dhttp.port=}"
-    ;;
-  "-Dlogs.dir="* )
-    LOGS_DIR="${1#-Dlogs.dir=}"
-    ;;
-  "-Dmaster="* )
-    MASTER="${1#-Dmaster=}"
-    ;;
-  "--version" )
-    echo "${BASH_SOURCE[0]##*/} $(git describe --tags HEAD 2>/dev/null || true)"
-    exit 0
-    ;;
-  * )
-    echo "$0: unknown argument: $1" 1>&2
-    exit 1
-    ;;
-  esac
-  shift 1
-done
-
-if [ -n "${APP_ENV}" ]; then
-  echo "APP_ENV = ${APP_ENV}"
-else
-  echo "$0: APP_ENV is not declared" 1>&2
-  exit 1
-fi
-
-if [ -f "config/database.yml" ]; then
-  PASSWORD="$(ruby -ryaml -e 'STDOUT.puts(YAML.load_file("config/database.yml")[ENV["APP_ENV"]]["password"])' || true)"
-  if [ -z "${PASSWORD}" ]; then
-    echo "$0: database password is not set" 1>&2
-    exit 1
-  fi
-else
-  echo "$0: database.yml doesn't exist" 1>&2
-  exit 1
-fi
-
-declare -a children
-
-on_exit() {
-  rm -fr "${DATA_DIR}/lock"
-  rm -fr "${LOGS_DIR}/lock"
-  kill -TERM "${children[@]}" || true
+options = {
+  environment: (ENV["APP_ENV"] || "development"),
+  logging: true,
+  dump_errors: true,
 }
-trap on_exit EXIT
 
-if [[ "$(whoami)" != "nobody" ]]; then
-  echo "$0: wrong user to launch my application" 1>&2
-  exit 1
-fi
+properties = File.join(ROOT, "config", "config.properties")
+if File.file?(properties)
+  options = options.merge(load_properties(properties))
+end
 
-if [ -d "${DATA_DIR}" ] && [ -w "${DATA_DIR}" ]; then
-  if mkdir "${DATA_DIR}/lock" 1>/dev/null 2>&1; then
-    echo "data.dir=${DATA_DIR}"
-  else
-    echo "$0: data.dir is already used from other process: ${DATA_DIR}" 1>&2
-    exit 1
-  fi
+discovery_uri = options.delete(:discovery_uri)
+
+if master = options.delete(:master)
+  application_type = "master"
 else
-  echo "$0: data.dir isn't available: ${DATA_DIR}" 1>&2
-  exit 1
-fi
+  application_type = "slave"
+end
 
-if [ -d "${LOGS_DIR}" ] && [ -w "${LOGS_DIR}" ]; then
-  if mkdir "${LOGS_DIR}/lock" 1>/dev/null 2>&1; then
-    echo "logs.dir=${LOGS_DIR}"
+if port = options.delete(:"http.port")
+  options[:port] = port
+end
+
+if data = options.delete(:"data.dir")
+  options[:public_folder] = data
+  dir = File.new(data)
+  unless dir.flock(File::LOCK_EX | File::LOCK_NB)
+    raise("another process is using data.dir=#{data.inspect}")
+  end
+end
+
+if logs = options.delete(:"logs.dir")
+  file = File.new(File.join(logs, "#{application_type}.log"), "a+")
+  file.sync = true
+  unless file.flock(File::LOCK_EX | File::LOCK_NB)
+    raise("another process is using logs.dir=#{logs.inspect}")
+  end
+  use Rack::CommonLogger, file
+end
+
+known_options = [
+  :bind,
+  :dump_errors,
+  :environment,
+  :logging,
+  :port,
+  :public_folder,
+  :root,
+  :sessions,
+  :static,
+]
+
+options.each do |k, v|
+  if known_options.include?(k)
+    set k, v
   else
-    echo "$0: logs.dir is already used from other process: ${LOGS_DIR}" 1>&2
-    exit 1
-  fi
-else
-  echo "$0: logs.dir isn't available: ${LOGS_DIR}" 1>&2
-  exit 1
-fi
+    STDERR.puts("unknown configuration: #{k}=#{v.inspect}")
+    exit(1)
+  end
+end
 
-echo "http.port=${HTTP_PORT}"
-nc -l -p "${HTTP_PORT}" -v &
-children[${#children[*]}]="$!"
-wait "${children[@]}"
+FileUtils.mkdir_p(File.join(ROOT, "tmp", "pids"))
+File.write(File.join(ROOT, "tmp", "pids", "#{application_type}.pid"), $$.to_s)
+
+get "/type" do
+  JSON.generate({"type": application_type})
+end
+
+get "/version" do
+  JSON.generate({"version": VERSION})
+end
+
+if master
+  STDERR.puts("master app")
+  $nodes = {}
+  $nodes_lock = Mutex.new
+
+  get "/status" do
+    $nodes_lock.synchronize do
+      if $nodes.length < 2 # master requires at least 2 slaves
+        JSON.generate({"status": "ng"})
+      else
+        JSON.generate({"status": "ok"})
+      end
+    end
+  end
+
+  get "/join" do
+    if params["environment"] != options[:environment]
+      error 400, "no environment specified"
+    end
+    $nodes_lock.synchronize do
+      $nodes["#{request.ip}:#{params["port"] || options[:port]}"] = Time.new.to_i
+    end
+    JSON.generate({"join": "ok"})
+  end
+
+  get "/leave" do
+    if params["environment"] != options[:environment]
+      error 400, "no environment specified"
+    end
+    $nodes_lock.synchronize do
+      $nodes["#{request.ip}:#{params["port"] || options[:port]}"] = nil
+    end
+    JSON.generate({"leave": "ok"})
+  end
+
+  get "/nodes" do
+    JSON.generate({"nodes": $nodes.select { |k, v| v }.keys})
+  end
+else
+  STDERR.puts("slave app")
+  $status = false
+
+  get "/status" do
+    JSON.generate({"status": $status ? "ok" : "ng"})
+  end
+
+  Thread.new do
+    loop do
+      if discovery_uri
+        begin
+          discovery = URI.join(URI.parse(discovery_uri), "join?#{URI.encode_www_form(environment: options[:environment], port: options[:port])}")
+          join = JSON.parse(open(discovery).read)
+          if join["join"] == "ok"
+            $status = true
+          else
+            raise("failed: #{join.inspect}")
+          end
+        rescue => error
+          STDERR.puts("failed to join: #{error.inspect}")
+        end
+      else
+        STDERR.puts("no discovery_uri is configured.")
+      end
+      sleep(2 + rand())
+    end
+  end
+end
