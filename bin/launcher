@@ -131,33 +131,24 @@ else
     JSON.generate({"status": $status ? "ok" : "ng"})
   end
 
-  get "/join" do
-    if discovery_uri
-      query = URI.encode_www_form(environment: options[:environment], port: options[:port])
-      uri = URI.join(URI.parse(discovery_uri), "join?#{query}")
-      join = JSON.parse(open(uri).read())
-      if join["join"] == "ok"
-        $status = true
-        JSON.generate({"join": "ok"})
-      else
-        error 400, "failed to join"
-      end
-    else
-      error 400, "failed to join"
-    end
-  end
-
   Thread.new do
     loop do
-      begin
-        join = JSON.parse(open(URI.parse("http://#{options[:bind] || "127.0.0.1"}:#{options[:port]}/join")).read)
-        if join["join"] == "ok"
-          # nop
+      if discovery_uri
+        begin
+          discovery = URI.join(URI.parse(discovery_uri), "join?#{URI.encode_www_form(environment: options[:environment], port: options[:port])}")
+          join = JSON.parse(open(discovery).read)
+          if join["join"] == "ok"
+            $status = true
+          else
+            raise("failed: #{join.inspect}")
+          end
+        rescue => error
+          STDERR.puts("failed to join: #{error.inspect}")
         end
-      rescue
-        # nop
+      else
+        STDERR.puts("no discovery_uri is configured.")
       end
-      sleep(2)
+      sleep(2 + rand())
     end
   end
 end
