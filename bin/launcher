@@ -9,7 +9,7 @@ require "thread"
 require "uri"
 
 ROOT = File.expand_path("../..", __FILE__)
-VERSION = "0.2.0"
+VERSION = File.read(File.join(ROOT, 'VERSION')).strip.lines.first.strip
 
 def load_properties(properties)
   lines = File.readlines(properties).map { |s| s.strip }.reject { |s| s.empty? or s.start_with?("#") }
