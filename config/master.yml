@@ -1,0 +1,5 @@
+---
+master: true
+http.port: 8080
+data.dir: ./data
+logs.dir: ./logs

@@ -7,24 +7,10 @@ require "open-uri"
 require "sinatra"
 require "thread"
 require "uri"
+require "yaml"
 
 ROOT = File.expand_path("../..", __FILE__)
 VERSION = File.read(File.join(ROOT, 'VERSION')).strip.lines.first.strip
-
-def load_properties(properties)
-  lines = File.readlines(properties).map { |s| s.strip }.reject { |s| s.empty? or s.start_with?("#") }
-  Hash[lines.map { |line|
-    k, v = line.split(/\s*=\s*/, 2)
-    case v
-    when /\A(\d+)\z/
-      [k.to_sym, v.to_i]
-    when /\A(false|true)\z/i
-      [k.to_sym, /\Afalse\z/i !~ v]
-    else
-      [k.to_sym, v.to_s]
-    end
-  }]
-end
 
 options = {
   environment: (ENV["APP_ENV"] || "development"),
@@ -32,17 +18,17 @@ options = {
   dump_errors: true,
 }
 
-properties = File.join(ROOT, "config", "config.properties")
-if File.file?(properties)
-  options = options.merge(load_properties(properties))
+config = ENV["APP_CONFIG"] || File.join(ROOT, "config", "config.yml")
+if File.file?(ENV["APP_CONFIG"])
+  options = options.merge(Hash[YAML.load_file(config).map { |k, v| [k.to_sym, v] }])
 end
 
 discovery_uri = options.delete(:discovery_uri)
 
-if master = options.delete(:master)
-  application_type = "master"
+if options.delete(:master)
+  process_type = :master
 else
-  application_type = "slave"
+  process_type = :slave
 end
 
 if port = options.delete(:"http.port")
@@ -58,7 +44,7 @@ if data = options.delete(:"data.dir")
 end
 
 if logs = options.delete(:"logs.dir")
-  file = File.new(File.join(logs, "#{application_type}.log"), "a+")
+  file = File.new(File.join(logs, "#{process_type}.log"), "a+")
   file.sync = true
   unless file.flock(File::LOCK_EX | File::LOCK_NB)
     raise("another process is using logs.dir=#{logs.inspect}")
@@ -87,63 +73,39 @@ options.each do |k, v|
   end
 end
 
-FileUtils.mkdir_p(File.join(ROOT, "tmp", "pids"))
-File.write(File.join(ROOT, "tmp", "pids", "#{application_type}.pid"), $$.to_s)
+pid = ENV["APP_PID"] || File.join(ROOT, "tmp", "pids", "#{process_type}.pid")
+FileUtils.mkdir_p(File.dirname(pid))
+File.write(pid, $$.to_s)
 
 get "/type" do
-  JSON.generate({"type": application_type})
+  JSON.generate({"type": process_type})
 end
 
 get "/version" do
   JSON.generate({"version": VERSION})
 end
 
-if master
-  STDERR.puts("master app")
-  $nodes = {}
-  $nodes_lock = Mutex.new
+$status = false
+$nodes = {}
+$nodes_lock = Mutex.new
 
-  get "/status" do
-    $nodes_lock.synchronize do
-      if $nodes.length < 2 # master requires at least 2 slaves
-        JSON.generate({"status": "ng"})
-      else
-        JSON.generate({"status": "ok"})
+if process_type == :master
+  Thread.new do
+    loop do
+      $nodes_lock.synchronize do
+        $nodes.delete_if do |node, t|
+          if Integer === t
+            10 <= (Time.new.to_i - t) # remove stale slave process
+          else
+            true
+          end
+        end
+        $status = 2 <= $nodes.length # master requires at least 2 slaves
       end
+      sleep(2 + rand())
     end
-  end
-
-  get "/join" do
-    if params["environment"] != options[:environment]
-      error 400, "no environment specified"
-    end
-    $nodes_lock.synchronize do
-      $nodes["#{request.ip}:#{params["port"] || options[:port]}"] = Time.new.to_i
-    end
-    JSON.generate({"join": "ok"})
-  end
-
-  get "/leave" do
-    if params["environment"] != options[:environment]
-      error 400, "no environment specified"
-    end
-    $nodes_lock.synchronize do
-      $nodes["#{request.ip}:#{params["port"] || options[:port]}"] = nil
-    end
-    JSON.generate({"leave": "ok"})
-  end
-
-  get "/nodes" do
-    JSON.generate({"nodes": $nodes.select { |k, v| v }.keys})
   end
 else
-  STDERR.puts("slave app")
-  $status = false
-
-  get "/status" do
-    JSON.generate({"status": $status ? "ok" : "ng"})
-  end
-
   Thread.new do
     loop do
       if discovery_uri
@@ -153,15 +115,70 @@ else
           if join["join"] == "ok"
             $status = true
           else
+            $status = false
             raise("failed: #{join.inspect}")
           end
         rescue => error
-          STDERR.puts("failed to join: #{error.inspect}")
+          STDERR.puts("failed to join: #{error.message}")
         end
       else
         STDERR.puts("no discovery_uri is configured.")
       end
       sleep(2 + rand())
     end
+  end
+end
+
+get "/status" do
+  if process_type == :master
+    $nodes_lock.synchronize do
+      if $status
+        JSON.generate({"status": "ok"})
+      else
+        JSON.generate({"status": "ng", "error": "cluster is not ready"})
+      end
+    end
+  else
+    if $status
+      JSON.generate({"status": "ok"})
+    else
+      JSON.generate({"status": "ng", "error": "not a member of a cluster"})
+    end
+  end
+end
+
+get "/join" do
+  if process_type == :master
+    if params["environment"] != options[:environment]
+      error 400, "no environment specified"
+    end
+    $nodes_lock.synchronize do
+      $nodes["#{request.ip}:#{params["port"] || options[:port]}"] = Time.new.to_i
+    end
+    JSON.generate({"join": "ok"})
+  else
+    error 400, "not a master process"
+  end
+end
+
+get "/leave" do
+  if process_type == :master
+    if params["environment"] != options[:environment]
+      error 400, "no environment specified"
+    end
+    $nodes_lock.synchronize do
+      $nodes["#{request.ip}:#{params["port"] || options[:port]}"] = nil
+    end
+    JSON.generate({"leave": "ok"})
+  else
+    error 400, "not a master process"
+  end
+end
+
+get "/nodes" do
+  if process_type == :master
+    JSON.generate({"nodes": $nodes.select { |k, v| v }.keys})
+  else
+    error 400, "not a master process"
   end
 end
