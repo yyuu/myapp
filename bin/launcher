@@ -19,7 +19,7 @@ options = {
 }
 
 config = ENV["APP_CONFIG"] || File.join(ROOT, "config", "config.yml")
-if File.file?(ENV["APP_CONFIG"])
+if File.file?(config)
   options = options.merge(Hash[YAML.load_file(config).map { |k, v| [k.to_sym, v] }])
 end
 
